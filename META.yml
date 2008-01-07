@@ -1,0 +1,54 @@
+---
+name: File-Assets
+version: 0.01
+author:
+  - 'Robert Krimen <rkrimen@cpan.org>'
+abstract: Manage .css and .js assets in a web application
+license: perl
+resources:
+  license: http://dev.perl.org/licenses/
+requires:
+  Carp::Clan: 0
+  Class::Data::Inheritable: 0
+  Digest: 0
+  MIME::Types: 0
+  Module::Pluggable: 0
+  Object::Tiny: 0
+  Path::Resource: 0
+  Scalar::Util: 0
+  Tie::LLHash: 0
+build_requires:
+  Directory::Scratch: 0
+  Test::Memory::Cycle: 0
+  Test::More: 0
+recommends:
+  CSS::Minifier: 0
+  JavaScript::Minifier: 0
+provides:
+  File::Assets:
+    file: lib/File/Assets.pm
+    version: 0.01
+  File::Assets::Asset:
+    file: lib/File/Assets/Asset.pm
+  File::Assets::Filter:
+    file: lib/File/Assets/Filter.pm
+  File::Assets::Filter::Collect:
+    file: lib/File/Assets/Filter/Collect.pm
+  File::Assets::Filter::Concat:
+    file: lib/File/Assets/Filter/Concat.pm
+  File::Assets::Filter::Minifier:
+    file: lib/File/Assets/Filter/Minifier.pm
+  File::Assets::Filter::Minifier::CSS:
+    file: lib/File/Assets/Filter/Minifier/CSS.pm
+  File::Assets::Filter::Minifier::JS:
+    file: lib/File/Assets/Filter/Minifier/JS.pm
+  File::Assets::Filter::Minifier::JavaScript:
+    file: lib/File/Assets/Filter/Minifier/JavaScript.pm
+  File::Assets::Filter::YUICompressor:
+    file: lib/File/Assets/Filter/YUICompressor.pm
+  File::Assets::Util:
+    file: lib/File/Assets/Util.pm
+generated_by: Module::Build version 0.2808
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.2.html
+  version: 1.2
