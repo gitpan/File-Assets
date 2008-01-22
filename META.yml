@@ -1,6 +1,6 @@
 ---
 name: File-Assets
-version: 0.031
+version: 0.032
 author:
   - 'Robert Krimen <rkrimen@cpan.org>'
 abstract: Manage .css and .js assets in a web application
@@ -27,7 +27,7 @@ recommends:
 provides:
   File::Assets:
     file: lib/File/Assets.pm
-    version: 0.031
+    version: 0.032
   File::Assets::Asset:
     file: lib/File/Assets/Asset.pm
   File::Assets::Filter:
