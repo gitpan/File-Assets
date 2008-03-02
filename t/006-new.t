@@ -7,8 +7,8 @@ use Test::More qw/no_plan/;
 use FindBin;
 use lib "$FindBin::Bin/lib";
 
-use File::Assets::Test;
-my $scratch = File::Assets::Test->scratch;
+use t::Test;
+my $scratch = t::Test->scratch;
 
 SKIP: {
     skip "URI::ToDisk is not installed" unless eval "require URI::ToDisk;";

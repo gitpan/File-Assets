@@ -9,11 +9,11 @@ File::Assets - Manage .css and .js assets in a web application
 
 =head1 VERSION
 
-Version 0.032
+Version 0.050
 
 =cut
 
-our $VERSION = '0.032';
+our $VERSION = '0.050';
 
 =head1 SYNOPSIS
 
@@ -32,7 +32,7 @@ our $VERSION = '0.032';
 
     [% WRAPPER page.tt %]
 
-    [% assets.include("/static/special-style.css") %]
+    [% assets.include("/static/special-style.css", 100) %] # The "100" is the rank, which makes sure it is exported after other assets
 
     # ... finally, in your "main" template:
 
@@ -68,7 +68,44 @@ File::Assets is a tool for managing JavaScript and CSS assets in a (web) applica
 
 This package has the added bonus of assisting with minification and filtering of assets. Support is built-in for YUI Compressor (L<http://developer.yahoo.com/yui/compressor/>), L<JavaScript::Minifier>, and L<CSS::Minifier>. Filtering is fairly straightforward to implement, so it's a good place to start if need a JavaScript or CSS preprocessor (e.g. something like HAML L<http://haml.hamptoncatlin.com/>)
 
-File::Assets was built with L<Catalyst> in mind, although this package is framework agnostic.
+File::Assets was built with L<Catalyst> in mind, although this package is framework agnostic. Look at L<Catalyst::Plugin::Assets> for an easy way to integrate File::Assets with Catalyst.
+
+=head1 USAGE
+
+=head2 Cascading style sheets and their media types
+
+A cascading style sheet can be one of many different media types. For more information, look here: L<http://www.w3.org/TR/REC-CSS2/media.html>
+
+This can cause a problem when minifying, since, for example, you can't bundle a media type of screen with a media type of print. File::Assets handles this situation by treating .css files of different media types separately. 
+
+To control the media type of a text/css asset, you can do the following:
+
+    $assets->include("/path/to/printstyle.css", ..., { media => "print" }); # The asset will be exported with the print-media indicator
+
+    $assets->include_content($content, "text/css", ..., { media => "screen" }); # Ditto, but for the screen type
+
+=head2 Including assets in the middle of processing a Template Toolkit template
+
+Sometimes, in the middle of a TT template, you want to include a new asset. Usually you would do something like this:
+
+    [% assets.include("/include/style.css") %]  
+
+But then this will show up in your output, because ->include returns an object:
+
+    File::Assets::Asset=HASH(0x99047e4)
+
+The way around this is to use the TT "CALL" directive, as in the following:
+
+    [% CALL assets.include("/include/style.css") %]
+
+=head2 Avoid minifying assets on every request (if you minify)
+
+By default, File::Assets will avoid re-minifying assets if nothing in the files have changed. However, in a web application, this can be a problem if you serve up two web pages that have different assets. That's because File::Assets will detect different assets being served in page A versus assets being served in page B (think AJAX interface vs. plain HTML with some CSS). The way around this problem is to name your assets object with a unique name per assets bundle. By default, the name is "assets", but can be changed with $assets->name(<a new name>):
+
+    my $assets = File::Assets->new(...);
+    $assets->name("standard");
+
+You can change the name of the assets at anytime before exporting.
 
 =head1 METHODS
 
@@ -79,10 +116,13 @@ use warnings;
 
 use Tie::LLHash;
 use File::Assets::Asset;
-use Object::Tiny qw/registry _registry_hash rsc filters output/;
+use Object::Tiny qw/registry _registry_hash rsc filter_scheme output_path_scheme output_asset_scheme/;
 use Path::Resource;
+use File::Assets::Kind;
+use File::Assets::Bucket;
 use Scalar::Util qw/blessed refaddr/;
 use Carp::Clan qw/^File::Assets::/;
+use HTML::Declare qw/LINK SCRIPT STYLE/;
 
 =head2 File::Assets->new( base => <base> )
 
@@ -111,17 +151,22 @@ sub new {
     $self->{registry} = tie(%registry, qw/Tie::LLHash/, { lazy => 1 });
     $self->{_registry_hash} = \%registry;
 
-    $self->{filters} = [];
-
     $self->{name} = $_{name};
-    $self->{output} = $_{output};
+
+    $self->{output_asset_scheme} = $_{output_asset} || $_{output_asset_scheme} || [];
+    $self->{output_path_scheme} = $_{output_path} || $_{output_path_scheme} || [];
+    $self->{filter_scheme} = {};
+    my $filter_scheme = $_{filter} || $_{filters} || $_{filter_scheme} || [];
+    for my $rule (@$filter_scheme) {
+        $self->filter(@$rule);
+    }
 
     return $self;
 }
 
-=head2 $asset = $assets->include(<path>, [ <rank>, <type> ])
+=head2 $asset = $assets->include(<path>, [ <rank>, <type>, { ... } ])
 
-=head2 $asset = $assets->include_path(<path>, [ <rank>, <type> ])
+=head2 $asset = $assets->include_path(<path>, [ <rank>, <type>, { ... } ])
 
 Include an asset located at "<base.dir>/<path>" for processing. The asset will be exported as "<base.uri>/<path>".
 
@@ -131,30 +176,116 @@ with a neutral rank of 0.
 
 Also, optionally, you can specify a type override as the third argument.
 
+By default, the newly created $asset is NOT inline.
+
 Returns the newly created asset.
+
+NOTE: See below for how the extra hash on the end is handled
+
+=head2 $asset = $assets->include({ ... })
+
+Another way to invoke include is by passing in a hash reference.
+
+The hash reference should contain the follwing information:
+    
+    path        # The path to the asset file, relative to base
+    content     # The content of the asset
+
+    type        # Optional if a path is given, required for content
+    rank        # Optional, 0 by default (Less than zero is earlier, greater than zero is later)
+    base        # Optional, by default the base of $assets
+    inline      # Optional, by default true if content was given, false is a path was given
+
+You can also pass extra information through the hash. Any extra information will be bundled in the ->attributes hash of $asset.
+For example, you can control the media type of a text/css asset by doing something like:
+
+    $assets->include("/path/to/printstyle.css", ..., { media => "print" }) # The asset will be exported with the print-media indicator
 
 =cut
 
-sub include {
-    my $self = shift;
-    return $self->include_path(@_);
-}
-
 sub include_path {
     my $self = shift;
-    my $path = shift;
-    my $rank = shift;
-    my $type = shift;
+    return $self->include(@_);
+}
 
-    croak "Don't have a path to include" unless defined $path && length $path;
+sub include {
+    my $self = shift;
 
-    return $self->fetch($path) if $self->exists($path);
+    my (@asset, $path);
+    if (ref $_[0] ne "HASH") {
+        $path = shift;
+        croak "Don't have a path to include" unless defined $path && length $path;
+        if (ref $path eq "SCALAR") {
+            push @asset, content => $path;
+        }
+        else {
+            return $self->fetch($path) if $self->exists($path);
+            push @asset, path => $path;
+        }
+    }
 
-    my $asset = File::Assets::Util->parse_asset_by_path(path => $path, type => $type, rank => $rank, base => $self->rsc);
+    for (qw/rank type/) {
+        last if ! @_ || ref $_[0] eq "HASH";
+        push @asset, $_ => shift;
+    }
+    push @asset, %{ $_[0] } if @_ && ref $_[0] eq "HASH";
+
+    my $asset = File::Assets::Asset->new(base => $self->rsc, @asset);
+
+    return $self->fetch($asset->path) if $asset->path && $self->exists($asset->path);
 
     $self->store($asset);
 
     return $asset;
+}
+
+=head2 $asset = $assets->include_content(<content>, [ <type>, <rank>, { ... } ])
+
+Include an asset with some content and of the supplied type. The value of <content> can be a "plain" string or a scalar reference.
+
+See ->include for more information on <rank>.
+
+By default, the newly created $asset is inline.
+
+Returns the newly created asset.
+
+NOTE: The order of the <type> and <rank> arguments are reversed from ->include and ->include_path
+
+=cut
+
+sub include_content {
+    my $self = shift;
+
+    my @asset;
+    for (qw/content type rank/) {
+        last if ! @_ || ref $_[0] eq "HASH";
+        push @asset, $_ => shift;
+    }
+    push @asset, %{ $_[0] } if @_ && ref $_[0] eq "HASH";
+
+    #my $asset = File::Assets::Asset::Content->new(@include);
+    my $asset = File::Assets::Asset->new(@asset);
+
+    $self->store($asset);
+
+    return $asset;
+}
+
+=head2 $name = $assets->name([ <name> ])
+
+Retrieve and/or change the "name" of $assets; by default it is "assets"
+
+This is useful for controlling the name of minified assets files.
+
+Returns the name of $assets
+
+=cut
+
+sub name {
+    my $self = shift;
+    $self->{name} = shift if @_;
+    my $name = $self->{name};
+    return defined $name && length $name ? $name : "assets";
 }
 
 =head2 $html = $assets->export([ <type> ])
@@ -187,28 +318,36 @@ sub _export_html {
     my $self = shift;
     my $assets = shift;
 
-    my $html = "";
+    my @content;
     for my $asset (@$assets) {
+        my %attributes = %{ $asset->attributes };
         if ($asset->type->type eq "text/css") {
-            $html .= <<_END_;
-<link rel="stylesheet" type="text/css" href="@{[ $asset->uri ]}" />
-_END_
+#        if ($asset->kind->extension eq "css") {
+            if (! $asset->inline) {
+                push @content, LINK({ rel => "stylesheet", type => $asset->type->type, href => $asset->uri, %attributes });
+            }
+            else {
+                push @content, STYLE({ type => $asset->type->type, %attributes, _ => "\n${ $asset->content }" });
+            }
         }
+#        elsif ($asset->kind->extension eq "js") {
         elsif ($asset->type->type eq "application/javascript" ||
                 $asset->type->type eq "application/x-javascript" || # Handle different MIME::Types versions.
                 $asset->type->type =~ m/\bjavascript\b/) {
-            $html .= <<_END_;
-<script src="@{[ $asset->uri ]}" type="text/javascript"></script>
-_END_
+            if (! $asset->inline) {
+                push @content, SCRIPT({ type => "text/javascript", src => $asset->uri, %attributes });
+            }
+            else {
+                push @content, SCRIPT({ type => "text/javascript", %attributes, _ => "\n${ $asset->content }" });
+            }
         }
 
         else {
-            $html .= <<_END_;
-<link type="@{[ $asset->type->type ]}" href="@{[ $asset->uri ]}" />
-_END_
+            croak "Don't know how to handle asset $asset" unless ! $asset->inline;
+            push @content, LINK({ type => $asset->type->type, href => $asset->uri });
         }
     }
-    return $html;
+    return join "\n", @content;
 }
 
 =head2 @assets = $assets->exports([ <type> ])
@@ -222,7 +361,6 @@ You can use this method to generate your own HTML, if necessary.
 sub exports {
     my $self = shift;
     my @assets = sort { $a->rank <=> $b->rank } $self->_exports(@_);
-    $self->_filter(\@assets);
     return @assets;
 }
 
@@ -260,35 +398,37 @@ sub store {
     my $self = shift;
     my $asset = shift;
 
-    $self->_registry_hash->{$asset->path} = $asset;
+    $self->_registry_hash->{$asset->key} = $asset;
 }
 
 =head2 $asset = $assets->fetch( <path> )
 
 Fetch the asset located at <path>
 
-Returns undef if nothing at <path> exists yet.
+Returns undef if nothing at <path> exists yet
 
 =cut
 
 sub fetch {
     my $self = shift;
-    my $path = shift;
+    my $key = shift;
 
-    return $self->_registry_hash->{$path};
+    return $self->_registry_hash->{$key};
 }
 
-=head2 $name = $assets->name([ <name> ])
-
-The name of the assets, by default it iss "assets".
-
-=cut
-
-sub name {
+sub kind {
     my $self = shift;
-    $self->{name} = shift if @_;
-    my $name = $self->{name};
-    return defined $name && length $name ? $name : "assets";
+    my $asset = shift;
+    my $type = $asset->type;
+
+    my $kind = File::Assets::Util->type_extension($type);
+    if (File::Assets::Util->same_type("css", $type)) {
+#        my $media = $asset->attributes->{media} || "screen"; # W3C says to assume screen by default, so we'll do the same.
+        my $media = $asset->attributes->{media};
+        $kind = "$kind-$media" if defined $media && length $media;
+    }
+
+    return File::Assets::Kind->new($kind, $type);
 }
 
 sub _exports {
@@ -296,45 +436,184 @@ sub _exports {
     my $type = shift;
     $type = File::Assets::Util->parse_type($type);
     my $hash = $self->_registry_hash;
-    return values %$hash unless defined $type;
-    return grep { $type->type eq $_->type->type } values %$hash;
+    my @assets; 
+    if (defined $type) {
+        @assets = grep { $type->type eq $_->type->type } values %$hash;
+    }
+    else {
+        @assets = values %$hash;
+    }
+
+    my %bucket;
+    for my $asset (@assets) {
+        my $kind = $self->kind($asset);
+        my $bucket = $bucket{$kind->kind} ||= File::Assets::Bucket->new($kind, $self);
+        $bucket->add_asset($asset);
+    }
+
+    my $filter_scheme = $self->{filter_scheme};
+    my @global = @{ $filter_scheme->{'*'} || [] };
+    my @bucket;
+    for my $kind (sort keys %bucket) {
+        push @bucket, my $bucket = $bucket{$kind};
+        $bucket->add_filter($_) for @global;
+        my $head = $bucket->kind->head;
+        for my $category (sort grep { ! m/^$head-/ } keys %$filter_scheme) {
+            next if length $category > length $kind; # Too specific
+            next unless 0 == index $kind, $category;
+            $bucket->add_filter($_) for (@{ $filter_scheme->{$category} });
+        }
+    }
+
+    return map { $_->exports } @bucket;
+}
+
+sub set_output_path_scheme {
+    my $self = shift;
+    $self->{output_path_scheme} = shift;
 }
 
 sub filter {
     my $self = shift;
-    my $_filter = shift;
-    croak "Couldn't find filter for ($_filter)"  unless my $filter = File::Assets::Util->parse_filter($_filter, @_, assets => $self);
-    push @{ $self->filters }, $filter;
-    return $filter;
-}
+    my ($kind, $filter);
+    if (@_ == 1) {
+        $filter = shift;
+    }
+    else {
+        $kind = File::Assets::Kind->new(shift);
+        $filter = shift;
+    }
+
+    my $name = $kind ? $kind->kind : '*';
+
+    my $category = $self->{filter_scheme}->{$name} ||= [];
+
+    my $_filter = $filter;
+    unless (blessed $_filter) {
+        croak "Couldn't find filter for ($filter)"  unless $_filter = File::Assets::Util->parse_filter($_filter, @_, assets => $self);
+    }
+
+    push @$category, $_filter;
+
+    return $_filter;
+} 
 
 sub filter_clear {
     my $self = shift;
-    if (@_) {
-        local %_ = @_;
-        if ($_{type}) {
-            my $type = File::Assets::Util->parse_type($_{type}) or croak "Don't know type ($_{type})";
-            for my $filter (@{ $self->filters }) {
-                $filter->remove if $filter->type && $filter->type->type eq $type->type;
-            }
+    if (blessed $_[0] && $_[0]->isa("File::Assets::Filter")) {
+        my $target = shift;
+        while (my ($name, $category) = each %{ $self->{filter_scheme} }) {
+            my @filters = grep { $_ != $target } @$category;
+            $self->{filter_scheme}->{$name} = \@filters;
         }
-        if ($_{filter}) {
-            my $filter = ref $_{filter} ? refaddr $_{filter} : $_{filter};
-            my @filters = grep { $filter ne refaddr $_ } @{ $self->filters };
-            $self->{filters} = \@filters;
-        }
+        return;
     }
-    else {
-        $self->{filters} = [];
-    }
+    carp __PACKAGE__, "::filter_clear(\$type) is deprecated, nothing happens" and return if @_;
+    $self->{filter_scheme} = {};
 }
 
-sub _filter {
+sub _calculate_best {
     my $self = shift;
-    my $assets = shift;
-    for my $filter (@{ $self->filters }) {
-        $filter->filter($assets);
+    my $scheme = shift;
+    my $kind = shift;
+    my $signature = shift;
+    my $handler = shift;
+    my $default = shift;
+
+    my $key = join ":", $kind->kind, $signature;
+
+    my ($best_kind, %return);
+    %return = %$default if $default;
+
+    # TODO Cache the result of this
+    for my $rule (@$scheme) {
+        my ($condition, $action, $flags) = @$rule;
+
+        my $result; # 1 - A better match; -1 - A match, but worse; undef - Skip, not a match!
+
+        if (ref $condition eq "CODE") {
+            next unless defined ($result = $condition->($kind, $signature, $best_kind));
+        }
+        elsif (ref $condition eq "") {
+            if ($condition eq $key) {
+                # Best possible match
+                $result = 1;
+                $best_kind = $kind;
+            }
+            elsif ($condition eq "*" || $condition eq "default") {
+                $result = $best_kind ? -1 : 1; 
+            }
+        }
+
+        my ($condition_kind, $condition_signature) = split m/:/, $condition, 2;
+            
+        unless (defined $result) {
+
+            # No exact match, try to find the best fit...
+
+            # Signature doesn't match or is not a wildcard, so move on to the next rule
+            next if defined $condition_signature && $condition_signature ne '*' && $condition_signature ne $signature;
+
+            if (length $condition_kind && $condition_kind ne '*') {
+                $condition_kind = File::Assets::Kind->new($condition_kind);
+
+                # Type isn't the same as the asset (or whatever) kind, so move on to the next rule
+                next unless File::Assets::Util->same_type($condition_kind->type, $kind->type);
+            }
+        }
+
+        # At this point, we have a match, but is it a better match then one we already have?
+        if (! $best_kind || ($condition_kind && $condition_kind->is_better_than($best_kind))) {
+            $result = 1;
+        }
+
+        next unless defined $result;
+
+        my %action;
+        %action = $handler->($action);
+
+        if ($result > 0) {
+            $return{$_} = $action{$_} for keys %action;
+        }
+        else {
+            for (keys %action) {
+                $return{$_} = $action{$_} unless defined $action{$_};
+            }
+        }
     }
+
+    return \%return;
+}
+
+sub output_path {
+    my $self = shift;
+    my $filter = shift;
+
+    my $result = $self->_calculate_best($self->{output_path_scheme}, $filter->kind, $filter->signature, sub {
+        my $action = shift;
+        return ref $action eq "CODE" ? %$action : path => $action;
+    });
+
+    return $result;
+}
+
+sub output_asset {
+    my $self = shift;
+    my $filter = shift;
+
+    if (0) {
+        my $result = $self->_calculate_best($self->{output_asset_scheme}, $filter->kind, $filter->signature, sub {
+            my $action = shift;
+            return %$action;
+        });
+    }
+
+    my $kind = $filter->kind;
+    my $output_path = $self->output_path($filter) or croak "Couldn't get output path for ", $kind->kind;
+    $output_path = File::Assets::Util->build_output_path($output_path, $filter);
+
+    my $asset = File::Assets::Asset->new(path => $output_path, base => $self->rsc, type => $kind->type);
+    return $asset;
 }
 
 1;

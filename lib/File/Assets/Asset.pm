@@ -5,7 +5,7 @@ use strict;
 
 use File::Assets::Util;
 use Carp::Clan qw/^File::Assets/;
-use Object::Tiny qw/rsc type rank/;
+use Object::Tiny qw/type rank attributes hidden rsc/;
 
 =head1 SYNPOSIS 
 
@@ -29,12 +29,27 @@ Creates a new File::Asset. You probably don't want to use this, create a L<File:
 
 sub new {
     my $self = bless {}, shift;
-    local %_ = @_;
-    my ($path, $rsc, $base, $content, $type, $rank) = @_{qw/path rsc base content type rank/};
+    my $asset = @_ == 1 && ref $_[0] eq "HASH" ? shift : { @_ };
+
+    my $content = delete $asset->{content};
+    $content = ref $content eq "SCALAR" ? $$content : $content;
+    $self->{content} = \$content;
+
+    my ($path, $rsc, $base) = delete @$asset{qw/path rsc base/};
+    my ($type) = delete @$asset{qw/type/};
+
+    if (defined $type) {
+        my $_type = $type;
+        $type = File::Assets::Util->parse_type($_type) or croak "Don't understand type ($_type) for this asset";
+    }
+
+    my ($key, $inline);
+    $inline = 0;
+
     if ($rsc) {
+        croak "Don't have a type for this asset" unless $type;
         $self->{rsc} = $rsc;
         $self->{type} = $type;
-        $self->{content} = $content if $content;
     }
     elsif ($base && $path) {
         if ($path =~ m/^\//) {
@@ -43,24 +58,28 @@ sub new {
         else {
             $self->{rsc} = $base->child($path);
         }
-        $self->{type} = File::Assets::Util->parse_type($type) ||
-            File::Assets::Util->parse_type($path) or 
-            croak "Don't know type for asset ($path)";
-        $self->{content} = $content if $content;
+        $self->{type} = $type || File::Assets::Util->parse_type($path) or croak "Don't know type for asset ($path)";
     }
-    elsif ($base && $content) {
-        $self->{type} = File::Assets::Util->parse_type($type) or
-            croak "Don't know type for asset ($path)";
-        $self->{content} = $content;
+    elsif ($content) {
+        $inline = 1;
+        croak "Don't have a type for this asset" unless $type;
+        $self->{type} = $type;
+    }
+    elsif (0 && $base && $content) { # Nonsense scenario?
+        croak "Don't have a type for this asset" unless $type;
         my $path = File::Assets::Util->build_asset_path(undef, type => $type, content_digest => $self->content_digest);
         $self->{rsc} = $base->child($path);
+        $self->{type} = $type;
     }
-    else {
-        croak "Don't know what to do: @_";
-    }
+
+    my $rank = $self->{rank} = delete $asset->{rank} || 0;
     croak "Don't understand rank ($rank)" if $rank && $rank =~ m/[^\d\+\-\.]/;
-    $self->{rank} = $rank ? $rank : 0;
-    $self->{mtime} = 0;
+
+    $self->{mtime} = delete $asset->{mtime} || 0;
+    $self->{inline} = exists $asset->{inline} ? (delete $asset->{inline} ? 1 : 0) : $inline;
+
+    $self->{attributes} = { %$asset }; # The rest goes here!
+
     return $self;
 }
 
@@ -72,6 +91,7 @@ Returns a L<URI> object represting the uri for $asset
 
 sub uri {
     my $self = shift;
+    return unless $self->{rsc};
     return $self->rsc->uri;
 }
 
@@ -83,11 +103,19 @@ Returns a L<Path::Class::File> object represting the file for $asset
 
 sub file {
     my $self = shift;
+    return unless $self->{rsc};
     return $self->{file} ||= $self->rsc->file;
 }
 
+=head2 $asset->path 
+
+Returns the path of $asset
+
+=cut
+
 sub path {
     my $self = shift;
+    return unless $self->{rsc};
     return $self->rsc->path;
 }
 
@@ -99,13 +127,14 @@ Returns a scalar reference to the content contained in $asset->file
 
 sub content {
     my $self = shift;
-    my $file = $self->file;
-    croak "Trying to get content from non-existent file ($file)" unless -e $file;
-    if (! $self->{content} || ($self->{mtime} != $file->stat->mtime)) {
-        local $/ = undef;
-        $self->{content} = \$self->file->slurp;
-        $self->{mtime} = $file->stat->mtime;
-        $self->{content_digest} = File::Assets::Util->digest->add(${ $self->{content} })->hexdigest;
+
+    if (my $file = $self->file) {
+        croak "Trying to get content from non-existent file ($file)" unless -e $file;
+        if (! $self->{content} || ($self->{mtime} != $file->stat->mtime)) {
+            local $/ = undef;
+            $self->{content} = \$self->file->slurp;
+            $self->{mtime} = $file->stat->mtime;
+        }
     }
     return $self->{content};
 }
@@ -130,33 +159,25 @@ sub write {
 
 =head2 $asset->digest
 
-Returns a hex digest for (currently the filename of) this asset
+=head2 $asset->content_digest
 
-This is NOT a hex digest of the content, for that, use $asset->content_digest
+Returns a hex digest for the content of $asset
 
-Hmm, this might change in the future.
+NOTE: $asset->digest used to return a unique signature for the asset (based off the filename), but this has changed to
+now return the actual hex digest of the content of $asset
 
 =cut
 
 sub digest {
     my $self = shift;
     return $self->{digest} ||= do {
-        File::Assets::Util->digest->add($self->file."")->hexdigest;
+        File::Assets::Util->digest->add(${ $self->content })->hexdigest;
     }
 }
 
-=head2 $asset->content_digest
-
-Returns the  hex digest of $asset->content
-
-=cut
-
 sub content_digest {
     my $self = shift;
-    return $self->{content_digest} ||= do {
-        $self->content;
-        $self->{content_digest};
-    }
+    return $self->digest;
 }
 
 =head2 $asset->mtime
@@ -167,8 +188,49 @@ Returns the (stat) mtime of $asset->file, or 0 if $asset->file does not exist
 
 sub mtime {
     my $self = shift;
+    return $self->{mtime} unless $self->{rsc};
     return 0 unless my $stat = $self->file->stat;
     return $stat->mtime;
+}
+
+=head2 $asset->key
+
+Returns the unique key for the $asset. Usually the path of the $asset, but for content-based assets returns a value based off of $asset->digest
+
+=cut
+
+sub key {
+    my $self = shift;
+    if ($self->{rsc}) {
+        return $self->path;
+    }
+    else {
+        return $self->{key} ||= '%' . $self->digest;
+    }
+}
+
+=head2 $asset->hide
+
+Hide $asset (mark it as hidden). That is, don't include $asset during export
+
+=cut
+
+sub hide {
+    shift->{hidden} = 1;
+}
+
+=head2 $asset->inline
+
+Returns whether $asset is inline (should be embedded into the document) or external.
+
+If an argument is given, then it will set whether $asset is inline or not (1 for inline, 0 for external).
+
+=cut
+
+sub inline {
+    my $self = shift;
+    $self->{inline} = shift() ? 1 : 0 if @_;
+    return $self->{inline};
 }
 
 1;
