@@ -17,17 +17,16 @@ requires 'Path::Resource';
 requires 'Scalar::Util';
 requires 'Tie::LLHash';
 requires 'Digest';
-requires 'Carp::Clan';
+requires 'Carp::Clan::Share';
 requires 'Object::Tiny';
-requires 'Class::Data::Inheritable';
 requires 'HTML::Declare';
 requires 'XML::Tiny';
 requires 'IO::Scalar';
 
-recommends 'JavaScript::Minifier';
 recommends 'CSS::Minifier';
-recommends 'CSS::Minifier::XS';
-recommends 'JavaScript::Minifier::XS';
+recommends 'JavaScript::Minifier';
+#recommends 'CSS::Minifier::XS';
+#recommends 'JavaScript::Minifier::XS';
 
 auto_install;
 

@@ -9,11 +9,11 @@ File::Assets - Manage .css and .js assets in a web application
 
 =head1 VERSION
 
-Version 0.060_1
+Version 0.060_2
 
 =cut
 
-our $VERSION = '0.060_1';
+our $VERSION = '0.060_2';
 
 =head1 SYNOPSIS
 
@@ -120,6 +120,31 @@ If you want to use the YUI Compressor, you should have version 2.2.5 or above.
 
 YUI Compressor 2.1.1 (and below) will *NOT WORK*
 
+=head2 Specifying an C<output_path> pattern
+
+You can use the following directives when crafting a path pattern:
+
+    %e      The extension of the asset (e.g. css, js)
+    %D      The content-digest of the asset (in hexadecimal, the content signature of the asset)
+    %d      The key-digest of the asset (in hexadecimal, the key signature of the asset)
+    %n      The name of the asset, "assets" by default
+    %k      The kind of the asset (e.g. css-screen, css, css-print, js)
+    %h      The head-part of the kind of the asset (e.g. css, js)
+    %l      The tail-part of the kind of the asset (e.g. screen, print) (essentially the media type of the .css asset)
+
+In addition, in each of the above, a ".", "/" or "-" can be placed in between the "%" and directive character.
+This will result in a ".", "/", or "-" being prepended to the directive value.
+
+The default pattern is:
+
+    %n%-l%-d.%e
+
+A pattern of C<%n%-l.%e> can result in the following:
+
+    assets.css          # name of "assets", no media type, an asset type of CSS (.css)
+    assets-screen.css   # name of "assets", media type of "screen", an asset type of CSS (.css)
+    assets.js           # name of "assets", an asset type of JavaScript (.js)
+
 =head1 METHODS
 
 =cut
@@ -127,26 +152,47 @@ YUI Compressor 2.1.1 (and below) will *NOT WORK*
 use strict;
 use warnings;
 
+use Object::Tiny qw/cache registry _registry_hash rsc filter_scheme output_path_scheme output_asset_scheme/;
+use File::Assets::Carp;
+
 use Tie::LLHash;
-use File::Assets::Asset;
-use Object::Tiny qw/registry _registry_hash rsc filter_scheme output_path_scheme output_asset_scheme/;
 use Path::Resource;
-use File::Assets::Kind;
-use File::Assets::Bucket;
 use Scalar::Util qw/blessed refaddr/;
-use Carp::Clan qw/^File::Assets::/;
 use HTML::Declare qw/LINK SCRIPT STYLE/;
 
-=head2 File::Assets->new( base => <base> )
+use File::Assets::Asset;
+use File::Assets::Cache;
+use File::Assets::Kind;
+use File::Assets::Bucket;
 
-Create and return a new File::Assets object. <base> can be:
+=head2 File::Assets->new( base => <base>, output_path => <output_path>, minify => <minify> )
+
+Create and return a new File::Assets object.
+
+You can configure the object with the following:
     
-* An array (list reference) where <base>[0] is a URI object or uri-like string (e.g. "http://www.example.com")
-and <base>[1] is a Path::Class::Dir object or a dir-like string (e.g. "/var/htdocs")
+    base            # A hash reference with a C<uri> key/value and a C<dir> key/value.
+                      For example: { uri => http://example.com/assets, dir => /var/www/htdocs/assets }
+    
+                    # A L<URI::ToDisk> object
 
-* A L<URI::ToDisk> object
+                    # A L<Path::Resource> object
 
-* A L<Path::Resource> object
+    minify          # "1" or "best" - Will either use L<JavaScript::Minifier::XS> & L<CSS::Minifier::XS> or
+                                      L<JavaScript::Minifier> & L<CSS::Minifier> (depending on availability)
+                                      for minification
+
+                    # "0" or "" or undef - Don't do any minfication (this is the default)
+
+                    # "./a/path/to/yuicompressor.jar" - Will use YUI Compressor via the given .jar for minification
+
+                    # "minifier" - Will use L<JavaScript::Minifier> & L<CSS::Minifier> for minification
+
+                    # "xs" or "minifier-xs" - Will use L<JavaScript::Minifier::XS> & L<CSS::Minifier::XS> for minification
+
+    output_path     # Designates the output path for minified .css and .js assets
+                      The default output path pattern is C<%n%-l%-d.%e> (rooted at the dir of <base>)
+                      See above in "Specifying an C<output_path> pattern" for details
 
 =cut
 
@@ -166,12 +212,30 @@ sub new {
 
     $self->{name} = $_{name};
 
-    $self->{output_asset_scheme} = $_{output_asset} || $_{output_asset_scheme} || [];
-    $self->{output_path_scheme} = $_{output_path} || $_{output_path_scheme} || [];
+    $self->set_output_path_scheme($_{output_path} || $_{output_path_scheme} || []);
+
     $self->{filter_scheme} = {};
     my $filter_scheme = $_{filter} || $_{filters} || $_{filter_scheme} || [];
     for my $rule (@$filter_scheme) {
         $self->filter(@$rule);
+    }
+
+    if (my $minify = $_{minify}) {
+#        if      ($minify eq 1 || $minify =~ m/^\s*(?:minifier-)?best\s*$/i)  { $self->filter("minifier-best") }
+        if      ($minify eq 1 || $minify =~ m/^\s*(?:minifier-)?best\s*$/i)  { $self->filter("minifier") }
+        elsif   ($minify =~ m/^\s*yuicompressor:/)                           { $self->filter($minify) }
+        elsif   ($minify =~ m/\.jar/i)                                       { $self->filter("yuicompressor:$minify") }
+#        elsif   ($minify =~ m/^\s*(?:minifier-)?xs\s*$/i)                    { $self->filter("minifier-xs") }
+        elsif   ($minify =~ m/^\s*(?:minifier-)?xs\s*$/i)                    { $self->filter("minifier") }
+        elsif   ($minify =~ m/^\s*minifier\s*$/i)                            { $self->filter("minifier") }
+        else                                                                 { croak "Don't understand minify option ($minify)" }
+    }
+
+    $_{cache} = 1 unless exists $_{cache};
+
+    if (my $cache = $_{cache}) {
+        $cache = File::Assets::Cache->new(name => $cache) unless blessed $cache && $cache->isa("File::Assets::Cache");
+        $self->{cache} = $cache;
     }
 
     return $self;
@@ -264,13 +328,9 @@ sub include {
     my %asset = @asset;
     _correct_for_proper_rank_and_type_order \%asset;
 
-    my $asset = File::Assets::Asset->new(base => $self->rsc, %asset);
+    my $asset = File::Assets::Asset->new(base => $self->rsc, cache => $self->cache, %asset);
 
-    return $self->fetch($asset->path) if $asset->path && $self->exists($asset->path);
-
-    $self->store($asset);
-
-    return $asset;
+    return $self->fetch_or_store($asset);
 }
 
 =head2 $asset = $assets->include_content(<content>, [ <type>, <rank>, { ... } ])
@@ -434,9 +494,9 @@ Returns true if <path> has been included, 0 otherwise.
 
 sub exists {
     my $self = shift;
-    my $path = shift;
+    my $key = shift;
 
-    return exists $self->_registry_hash->{$path} ? 1 : 0;
+    return exists $self->_registry_hash->{$key} ? 1 : 0;
 }
 
 =head2 $assets->store( <asset> )
@@ -449,7 +509,7 @@ sub store {
     my $self = shift;
     my $asset = shift;
 
-    $self->_registry_hash->{$asset->key} = $asset;
+    return $self->_registry_hash->{$asset->key} = $asset;
 }
 
 =head2 $asset = $assets->fetch( <path> )
@@ -465,6 +525,15 @@ sub fetch {
     my $key = shift;
 
     return $self->_registry_hash->{$key};
+}
+
+sub fetch_or_store {
+    my $self = shift;
+    my $asset = shift;
+
+    return $self->fetch($asset->key) if $self->exists($asset->key);
+
+    return $self->store($asset);
 }
 
 sub kind {
@@ -521,7 +590,18 @@ sub _exports {
 
 sub set_output_path_scheme {
     my $self = shift;
-    $self->{output_path_scheme} = shift;
+    my $scheme = shift;
+
+    if ($scheme && ref $scheme ne "ARRAY") {
+        $scheme = [ [ qw/*/ => $scheme ] ];
+    }
+
+    $self->{output_path_scheme} = $scheme;
+}
+
+sub set_output_path {
+    my $self = shift;
+    $self->set_output_path_scheme(@_);
 }
 
 sub filter {
@@ -541,7 +621,7 @@ sub filter {
 
     my $_filter = $filter;
     unless (blessed $_filter) {
-        croak "Couldn't find filter for ($filter)"  unless $_filter = File::Assets::Util->parse_filter($_filter, @_, assets => $self);
+        croak "Couldn't find filter for ($filter)" unless $_filter = File::Assets::Util->parse_filter($_filter, @_, assets => $self);
     }
 
     push @$category, $_filter;
@@ -723,3 +803,20 @@ under the same terms as Perl itself.
 =cut
 
 1; # End of File::Assets
+
+__END__
+
+#    if (my $cache = $self->cache) {
+#        return 1 if $cache->exists($self->rsc->dir, $key);
+#    }
+
+#    if (my $cache = $self->cache) {
+#        $cache->store($self->rsc->dir, $asset);
+#    }
+
+#    if (my $cache = $self->cache) {
+#        if ($asset = $cache->fetch($self->rsc->dir, $key)) {
+#            return $self->store($asset);
+#        }
+#    }
+
