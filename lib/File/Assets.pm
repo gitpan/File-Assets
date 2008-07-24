@@ -9,11 +9,11 @@ File::Assets - Manage .css and .js assets in a web application
 
 =head1 VERSION
 
-Version 0.060_7
+Version 0.061
 
 =cut
 
-our $VERSION = '0.060_7';
+our $VERSION = '0.061';
 
 =head1 SYNOPSIS
 
@@ -255,7 +255,7 @@ sub new {
 
     if (my $minify = $_{minify}) {
         if      ($minify eq 1 || $minify =~ m/^\s*(?:minifier-)?best\s*$/i)  { $self->filter("minifier-best") }
-        elsif   ($minify =~ m/^\s*yuicompressor:/)                           { $self->filter($minify) }
+        elsif   ($minify =~ m/^\s*yui-?compressor:/)                         { $self->filter($minify) }
         elsif   ($minify =~ m/\.jar/i)                                       { $self->filter("yuicompressor:$minify") }
         elsif   ($minify =~ m/^\s*(?:minifier-)?xs\s*$/i)                    { $self->filter("minifier-xs") }
         elsif   ($minify =~ m/^\s*minifier\s*$/i)                            { $self->filter("minifier") }
@@ -615,7 +615,7 @@ sub _exports {
 
 =head2 $assets->set_name( <name> )
 
-Set the "name" of $assets
+Set the name of $assets
 
 This is exactly the same as
 
@@ -632,12 +632,12 @@ Set the base uri, dir, and path for assets
 
     { uri => ..., dir => ..., path => ... }
 
-Given a dir of "/var/www/htdocs", a uri of "http://example.com/static", and a
-path of "assets" then:
+Given a dir of C</var/www/htdocs>, a uri of C<http://example.com/static>, and a
+path of C<assets> then:
 
     $assets will look for files in "/var/www/htdocs/assets"
 
-    $assets will "serve" files with "http://example.com/statis/assets"
+    $assets will "serve" files with "http://example.com/static/assets"
 
 =cut
 
